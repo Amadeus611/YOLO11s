@@ -25,19 +25,19 @@ def main():
         # Table 1: 主创新点逐步叠加
         # =====================================================
         {
-            "yaml": "ultralytics/cfg/models/11/yolo11.yaml",
+            "yaml": "ultralytics/cfg/models/11/yolo11s.yaml",
             "name": "Exp01_Baseline",
             "snaa": False,
             "batch": 8,
         },
         {
-            "yaml": "ultralytics/cfg/models/11/yolo11-pvrp.yaml",
+            "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp.yaml",
             "name": "Exp02_PVRP_Main",
             "snaa": False,
             "batch": 8,
         },
         {
-            "yaml": "ultralytics/cfg/models/11/yolo11-pvrp-lite.yaml",
+            "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-lite.yaml",
             "name": "Exp03_PVRP_Lite_SNAA_Full",
             "snaa": True,  # ← 主 + 副 + SNAA 全开（论文主模型）
             "batch": 8,
@@ -47,13 +47,13 @@ def main():
         # Table 2: 主 + loss / 主 + 副 对比
         # =====================================================
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp.yaml",
         #     "name": "Exp04_PVRP_SNAA",
         #     "snaa": True,  # 主创新 + SNAA，不加 Lite
         #     "batch": 8,
         # },
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp-lite.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-lite.yaml",
         #     "name": "Exp05_PVRP_Lite",
         #     "snaa": False,  # 主创新 + Lite，不加 SNAA
         #     "batch": 8,
@@ -63,25 +63,25 @@ def main():
         # Table 3: 主创新内部子模块消融
         # =====================================================
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp-s1.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-s1.yaml",
         #     "name": "Exp06_PVRP_S1_Only",
         #     "snaa": False,
         #     "batch": 8,
         # },
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp-s3.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-s3.yaml",
         #     "name": "Exp07_PVRP_S3_Only",
         #     "snaa": False,
         #     "batch": 8,
         # },
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp-s12.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-s12.yaml",
         #     "name": "Exp08_PVRP_S12",
         #     "snaa": False,
         #     "batch": 8,
         # },
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp-s13.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-s13.yaml",
         #     "name": "Exp09_PVRP_S13",
         #     "snaa": False,
         #     "batch": 8,
@@ -91,13 +91,13 @@ def main():
         # Table 4: 副创新 Lite 子模块消融
         # =====================================================
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp-lite-s4.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-lite-s4.yaml",
         #     "name": "Exp10_Lite_S4_SlimOnly",
         #     "snaa": False,
         #     "batch": 8,
         # },
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp-lite-s5.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-lite-s5.yaml",
         #     "name": "Exp11_Lite_S5_ReallocOnly",
         #     "snaa": False,
         #     "batch": 8,
@@ -107,14 +107,14 @@ def main():
         # Table 5: SNAA 内部项消融
         # =====================================================
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp.yaml",
         #     "name": "Exp12_SNAA_ScaleOnly",
         #     "snaa": True,
         #     "snaa_beta": 0.0,  # ← 关闭 neighbor 项
         #     "batch": 8,
         # },
         # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11-pvrp.yaml",
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp.yaml",
         #     "name": "Exp13_SNAA_NeighborOnly",
         #     "snaa": True,
         #     "snaa_kappa": 0.0,  # ← 关闭 scale 项
@@ -139,10 +139,10 @@ def main():
         # 组装训练参数（fixed + per-experiment overrides）
         train_kwargs = dict(
             # --- 实验变量参数 ---
-            data="UAVDT.yaml",
-            epochs=200,
+            data="EVD4UAV.yaml",
+            epochs=100,
             batch=exp["batch"],
-            imgsz=1024,            # 无人机微小目标必须使用高分辨率
+            imgsz=960,            # 无人机微小目标必须使用高分辨率
             name=exp["name"],
             snaa=exp["snaa"],      # SNAA 损失开关
             project="/home/ssssss/1yolo/Ablation_Results",
