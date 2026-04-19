@@ -179,6 +179,10 @@ CFG_FLOAT_KEYS = frozenset(
         "time",
         "workspace",
         "batch",
+        "snaa_kappa",
+        "snaa_tau",
+        "snaa_beta",
+        "snaa_alpha_max",
     }
 )
 CFG_FRACTION_KEYS = frozenset(
@@ -231,6 +235,7 @@ CFG_BOOL_KEYS = frozenset(
         "verbose",
         "deterministic",
         "single_cls",
+        "snaa",
         "rect",
         "cos_lr",
         "overlap_mask",

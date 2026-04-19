@@ -125,8 +125,15 @@ class BboxLoss(nn.Module):
         fg_mask: torch.Tensor,
         imgsz: torch.Tensor,
         stride: torch.Tensor,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute IoU and DFL losses for bounding boxes."""
+        """Compute IoU and DFL losses for bounding boxes.
+
+        ``**kwargs`` is accepted so that ``v8DetectionLoss`` may always forward
+        extra GT-context tensors (``gt_labels``, ``gt_bboxes``, ``target_gt_idx``,
+        ``mask_gt``, ``stride_tensor``) when SNAA is enabled, without breaking
+        the standard ``BboxLoss`` or the inherited ``RotatedBboxLoss`` signature.
+        """
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
@@ -147,6 +154,189 @@ class BboxLoss(nn.Module):
             pred_dist[..., 1::2] /= imgsz[0]
             loss_dfl = (
                 F.l1_loss(pred_dist[fg_mask], target_ltrb[fg_mask], reduction="none").mean(-1, keepdim=True) * weight
+            )
+            loss_dfl = loss_dfl.sum() / target_scores_sum
+
+        return loss_iou, loss_dfl
+
+
+class SNAABboxLoss(BboxLoss):
+    """Scale-Neighbor Aware Attraction (SNAA) Bounding-Box Loss.
+
+    Replaces only the IoU similarity term of ``BboxLoss`` with a weighted IoU
+    loss:
+
+        L_iou = sum_i [ cls_weight_i * alpha_i * rho_i * (1 - CIoU_i) ] / Z
+
+    where
+
+        alpha_i  = clamp(1 + kappa * log(s_ref / s_i), 1, alpha_max)
+        rho_i    = 1 + beta * exp(-tau * (d_i / s_i)^2)
+
+    ``s_i = sqrt(w_i * h_i)`` is the scale of the GT assigned to anchor i in
+    image pixels, ``s_ref`` is the mean scale over valid GTs in the batch, and
+    ``d_i`` is the center distance from that GT to its nearest *same-class*
+    neighbor GT in the same image (``inf`` if no eligible neighbor).
+
+    The DFL term and the classification BCE term are unchanged -- only the IoU
+    weighting is modified. Setting ``kappa=0`` disables the scale term (alpha=1)
+    and ``beta=0`` disables the neighbor term (rho=1); setting both to 0 falls
+    back to the standard CIoU loss exactly.
+
+    Args:
+        reg_max (int): DFL channels (identical to ``BboxLoss``).
+        kappa (float): Steepness of the small-object scale weighting.
+        tau (float): Temperature of the neighbor distance decay.
+        beta (float): Strength of the neighbor attraction term.
+        alpha_max (float): Upper clip on the scale weight.
+        eps (float): Numerical stability epsilon.
+    """
+
+    def __init__(
+        self,
+        reg_max: int,
+        kappa: float = 1.0,
+        tau: float = 1.0,
+        beta: float = 0.5,
+        alpha_max: float = 4.0,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__(reg_max)
+        self.kappa = float(kappa)
+        self.tau = float(tau)
+        self.beta = float(beta)
+        self.alpha_max = float(alpha_max)
+        self.eps = float(eps)
+
+    @staticmethod
+    def _nearest_same_class_dist(
+        gt_bboxes: torch.Tensor,
+        gt_labels: torch.Tensor,
+        mask_gt: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-GT nearest same-class center distance, ``inf`` if none.
+
+        Args:
+            gt_bboxes (Tensor): ``(B, N, 4)`` xyxy GT boxes in image pixels.
+            gt_labels (Tensor): ``(B, N, 1)`` GT class ids.
+            mask_gt (Tensor): ``(B, N, 1)`` bool mask of valid (non-padded) GTs.
+
+        Returns:
+            d_min (Tensor): ``(B, N)`` nearest same-class neighbor distance.
+        """
+        B, N, _ = gt_bboxes.shape
+        if N == 0:
+            return gt_bboxes.new_zeros(B, 0)
+        centers = (gt_bboxes[..., :2] + gt_bboxes[..., 2:4]) * 0.5  # (B, N, 2)
+        dists = torch.cdist(centers, centers)  # (B, N, N)
+        labels = gt_labels.squeeze(-1)  # (B, N)
+        same_cls = labels.unsqueeze(1) == labels.unsqueeze(2)  # (B, N, N)
+        valid = mask_gt.squeeze(-1).bool()  # (B, N)
+        valid_pair = valid.unsqueeze(1) & valid.unsqueeze(2)  # (B, N, N)
+        eye = torch.eye(N, dtype=torch.bool, device=gt_bboxes.device).unsqueeze(0)
+        eligible = same_cls & valid_pair & ~eye
+        dists = dists.masked_fill(~eligible, float("inf"))
+        return dists.amin(dim=-1)  # (B, N)
+
+    def _compute_weights(
+        self,
+        fg_mask: torch.Tensor,
+        target_gt_idx: torch.Tensor,
+        gt_labels: torch.Tensor,
+        gt_bboxes: torch.Tensor,
+        mask_gt: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute per-fg-anchor SNAA weights (alpha and rho).
+
+        Returns:
+            alpha (Tensor): ``(n_fg,)`` scale weight for each foreground anchor.
+            rho (Tensor): ``(n_fg,)`` neighbor weight for each foreground anchor.
+        """
+        valid = mask_gt.squeeze(-1).bool()  # (B, N)
+        # Per-GT scale sqrt(w*h) in image pixels
+        wh = (gt_bboxes[..., 2:4] - gt_bboxes[..., 0:2]).clamp_min(0)  # (B, N, 2)
+        area = wh.prod(-1).clamp_min(self.eps)  # (B, N)
+        sigma_gt = area.sqrt()  # (B, N)
+        # Reference scale = mean sqrt(area) over valid GTs; fall back to 1 if none
+        if valid.any():
+            s_ref = sigma_gt[valid].mean().clamp_min(self.eps)
+        else:
+            s_ref = sigma_gt.new_tensor(1.0)
+        # Gather per-fg-anchor
+        sigma_per_anchor = sigma_gt.gather(dim=1, index=target_gt_idx)  # (B, N_a)
+        sigma_fg = sigma_per_anchor[fg_mask].clamp_min(self.eps)  # (n_fg,)
+
+        # Scale weight
+        if self.kappa > 0:
+            log_ratio = torch.log((s_ref + self.eps) / sigma_fg)
+            alpha = (1.0 + self.kappa * log_ratio).clamp(min=1.0, max=self.alpha_max)
+        else:
+            alpha = torch.ones_like(sigma_fg)
+
+        # Neighbor weight
+        if self.beta > 0:
+            d_gt = self._nearest_same_class_dist(gt_bboxes, gt_labels, mask_gt)  # (B, N)
+            d_per_anchor = d_gt.gather(dim=1, index=target_gt_idx)  # (B, N_a)
+            d_fg = d_per_anchor[fg_mask]  # (n_fg,)
+            ratio_sq = (d_fg / sigma_fg).clamp_max(1e6).pow(2)
+            rho = 1.0 + self.beta * torch.exp(-self.tau * ratio_sq)
+        else:
+            rho = torch.ones_like(sigma_fg)
+
+        return alpha, rho
+
+    def forward(
+        self,
+        pred_dist: torch.Tensor,
+        pred_bboxes: torch.Tensor,
+        anchor_points: torch.Tensor,
+        target_bboxes: torch.Tensor,
+        target_scores: torch.Tensor,
+        target_scores_sum: torch.Tensor,
+        fg_mask: torch.Tensor,
+        imgsz: torch.Tensor,
+        stride: torch.Tensor,
+        gt_labels: torch.Tensor = None,
+        gt_bboxes: torch.Tensor = None,
+        target_gt_idx: torch.Tensor = None,
+        mask_gt: torch.Tensor = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute SNAA-weighted IoU loss and standard DFL loss."""
+        cls_weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+
+        if (
+            gt_labels is not None
+            and gt_bboxes is not None
+            and target_gt_idx is not None
+            and mask_gt is not None
+            and fg_mask.any()
+        ):
+            alpha, rho = self._compute_weights(fg_mask, target_gt_idx, gt_labels, gt_bboxes, mask_gt)
+            effective = cls_weight * (alpha * rho).unsqueeze(-1)
+        else:
+            effective = cls_weight
+        loss_iou = ((1.0 - iou) * effective).sum() / target_scores_sum
+
+        # DFL loss -- identical to BboxLoss
+        if self.dfl_loss:
+            target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
+            loss_dfl = (
+                self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * cls_weight
+            )
+            loss_dfl = loss_dfl.sum() / target_scores_sum
+        else:
+            target_ltrb = bbox2dist(anchor_points, target_bboxes)
+            target_ltrb = target_ltrb * stride
+            target_ltrb[..., 0::2] /= imgsz[1]
+            target_ltrb[..., 1::2] /= imgsz[0]
+            pred_dist = pred_dist * stride
+            pred_dist[..., 0::2] /= imgsz[1]
+            pred_dist[..., 1::2] /= imgsz[0]
+            loss_dfl = (
+                F.l1_loss(pred_dist[fg_mask], target_ltrb[fg_mask], reduction="none").mean(-1, keepdim=True)
+                * cls_weight
             )
             loss_dfl = loss_dfl.sum() / target_scores_sum
 
@@ -362,7 +552,16 @@ class v8DetectionLoss:
             stride=self.stride.tolist(),
             topk2=tal_topk2,
         )
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        if getattr(h, "snaa", False):
+            self.bbox_loss = SNAABboxLoss(
+                m.reg_max,
+                kappa=getattr(h, "snaa_kappa", 1.0),
+                tau=getattr(h, "snaa_tau", 1.0),
+                beta=getattr(h, "snaa_beta", 0.5),
+                alpha_max=getattr(h, "snaa_alpha_max", 4.0),
+            ).to(device)
+        else:
+            self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -433,7 +632,8 @@ class v8DetectionLoss:
             bce_loss *= self.class_weights
         loss[1] = bce_loss.sum() / target_scores_sum  # BCE
 
-        # Bbox loss
+        # Bbox loss (SNAA-aware: the extra GT-context kwargs are consumed by
+        # SNAABboxLoss when enabled and silently ignored by the standard BboxLoss).
         if fg_mask.sum():
             loss[0], loss[2] = self.bbox_loss(
                 pred_distri,
@@ -445,6 +645,10 @@ class v8DetectionLoss:
                 fg_mask,
                 imgsz,
                 stride_tensor,
+                gt_labels=gt_labels,
+                gt_bboxes=gt_bboxes,
+                target_gt_idx=target_gt_idx,
+                mask_gt=mask_gt,
             )
 
         loss[0] *= self.hyp.box  # box gain

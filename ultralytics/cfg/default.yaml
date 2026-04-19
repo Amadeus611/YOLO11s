@@ -107,6 +107,11 @@ pose: 12.0 # (float) pose loss gain (pose tasks)
 kobj: 1.0 # (float) keypoint objectness loss gain (pose tasks)
 rle: 1.0 # (float) rle loss gain (pose tasks)
 angle: 1.0 # (float) oriented angle loss gain (obb tasks)
+snaa: False # (bool) enable Scale-Neighbor Aware Attraction (SNAA) loss, replacing the IoU term in box loss
+snaa_kappa: 1.0 # (float) SNAA scale-weight steepness; 0 disables the scale term
+snaa_tau: 1.0 # (float) SNAA neighbor-distance temperature
+snaa_beta: 0.5 # (float) SNAA neighbor-term strength; 0 disables the neighbor term
+snaa_alpha_max: 4.0 # (float) SNAA scale-weight upper clip
 nbs: 64 # (int) nominal batch size used for loss normalization
 hsv_h: 0.015 # (float) HSV hue augmentation fraction
 hsv_s: 0.7 # (float) HSV saturation augmentation fraction

@@ -28,6 +28,7 @@ from ultralytics.nn.modules import (
     A2C2f,
     AConv,
     ADown,
+    AntiAliasDown,
     Bottleneck,
     BottleneckCSP,
     C2f,
@@ -55,6 +56,8 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     Index,
     LRPCHead,
+    NeighborDecoupleAdapter,
+    P2Proxy,
     Pose,
     Pose26,
     RepC3,
@@ -66,6 +69,7 @@ from ultralytics.nn.modules import (
     SCDown,
     Segment,
     Segment26,
+    SemanticGatedFuse,
     TorchVision,
     WorldDetect,
     YOLOEDetect,
@@ -1608,6 +1612,9 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             C2fCIB,
             A2C2f,
+            P2Proxy,
+            AntiAliasDown,
+            NeighborDecoupleAdapter,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1627,6 +1634,7 @@ def parse_model(d, ch, verbose=True):
             C2fCIB,
             C2PSA,
             A2C2f,
+            P2Proxy,
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
@@ -1678,6 +1686,11 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+        elif m is SemanticGatedFuse:
+            c2 = args[0]
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            args = [ch[f[0]], ch[f[1]], c2, *args[1:]]
         elif m in frozenset(
             {
                 Detect,

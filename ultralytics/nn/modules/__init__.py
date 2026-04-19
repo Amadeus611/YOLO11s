@@ -93,6 +93,12 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
+from .pvrp import (
+    AntiAliasDown,
+    NeighborDecoupleAdapter,
+    P2Proxy,
+    SemanticGatedFuse,
+)
 from .transformer import (
     AIFI,
     MLP,
@@ -127,6 +133,7 @@ __all__ = (
     "A2C2f",
     "AConv",
     "ADown",
+    "AntiAliasDown",
     "Attention",
     "BNContrastiveHead",
     "Bottleneck",
@@ -165,6 +172,8 @@ __all__ = (
     "MLPBlock",
     "MSDeformAttn",
     "MaxSigmoidAttnBlock",
+    "NeighborDecoupleAdapter",
+    "P2Proxy",
     "Pose",
     "Pose26",
     "Proto",
@@ -177,6 +186,7 @@ __all__ = (
     "SCDown",
     "Segment",
     "Segment26",
+    "SemanticGatedFuse",
     "SpatialAttention",
     "TorchVision",
     "TransformerBlock",
