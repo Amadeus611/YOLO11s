@@ -28,19 +28,19 @@ def main():
             "yaml": "ultralytics/cfg/models/11/yolo11s.yaml",
             "name": "Exp01_Baseline",
             "snaa": False,
-            "batch": 8,
+            "batch": 16,
         },
         {
             "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp.yaml",
             "name": "Exp02_PVRP_Main",
             "snaa": False,
-            "batch": 8,
+            "batch": 16,
         },
         {
             "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-lite.yaml",
             "name": "Exp03_PVRP_Lite_SNAA_Full",
             "snaa": True,  # ← 主 + 副 + SNAA 全开（论文主模型）
-            "batch": 8,
+            "batch": 16,
         },
 
         # =====================================================
@@ -139,8 +139,8 @@ def main():
         # 组装训练参数（fixed + per-experiment overrides）
         train_kwargs = dict(
             # --- 实验变量参数 ---
-            data="EVD4UAV.yaml",
-            epochs=100,
+            data="UAVDT.yaml",
+            epochs=1,
             batch=exp["batch"],
             imgsz=960,            # 无人机微小目标必须使用高分辨率
             name=exp["name"],
@@ -157,7 +157,7 @@ def main():
 
             # --- 航拍增强参数 ---
             mosaic=1.0,
-            close_mosaic=30,
+            close_mosaic=5,
             mixup=0.0,
             copy_paste=0.3,
 

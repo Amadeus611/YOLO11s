@@ -1,6 +1,6 @@
 # EVD4UAV Dataset Configuration for YOLOv8/YOLO11
 
-path: /home/ssssss/1yolo/EVD4UAV/YOLO_Dataset
+path: /home/ssssss/1yolo/Dataset/EVD4UAV_YOLO
 
 # 训练集和验证集的图片目录 (相对于上面的 path 路径)
 train: images/train
