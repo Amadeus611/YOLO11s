@@ -158,7 +158,7 @@ class NeighborDecoupleAdapter(nn.Module):
         c_mid = max(c1 // reduction, 16)
         self.cv_red = Conv(c1, c_mid, k=1)
         self.cv_local = Conv(c_mid, c_mid, k=3)
-        self.cv_context = Conv(c_mid, c_mid, k=5)
+        self.cv_context = Conv(c_mid, c_mid, k=7)  # 扩大上下文感受野以增强密集车辆边界对比
         self.contrast_gate = nn.Sequential(
             nn.Conv2d(c_mid, 1, kernel_size=1, bias=True),
             nn.Sigmoid(),
