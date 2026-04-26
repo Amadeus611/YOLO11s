@@ -1,5 +1,5 @@
 # UAVDT -> YOLO
-path: /home/ssssss/1yolo/Dataset/UAVDT_YOLO
+path: /home/ssssss/1yolo/Dataset/UAVDT_Mini
 train: images/train
 val: images/val
 
