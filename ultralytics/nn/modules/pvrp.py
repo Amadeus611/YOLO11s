@@ -50,6 +50,8 @@ class P2Proxy(nn.Module):
             for _ in range(n)
         )
         self.add = shortcut
+        # Residual projection: if proxy learns poorly, original features pass through safely
+        self.shortcut_proj = Conv(c1, c2, 1) if c1 != c2 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = list(self.cv1(x).chunk(2, 1))
@@ -58,7 +60,7 @@ class P2Proxy(nn.Module):
             if self.add:
                 out = out + y[-1]
             y.append(out)
-        return self.cv2(torch.cat(y, 1))
+        return self.cv2(torch.cat(y, 1)) + self.shortcut_proj(x)
 
 
 class AntiAliasDown(nn.Module):
@@ -130,6 +132,12 @@ class SemanticGatedFuse(nn.Module):
         )
         self.fuse = Conv(c_low + c_high, c_out, k=1)
 
+        # Gate warm-start: bias=+1 -> sigmoid(1)=0.73
+        # Proxy signal retains 0.73*0.73=53% at init (vs default 0.5*0.5=25%)
+        # Prevents proxy branch cold-start that wastes epochs on small datasets
+        nn.init.constant_(self.channel_gate[1].bias, 1.0)
+        nn.init.constant_(self.spatial_gate[0].bias, 1.0)
+
     def forward(self, x):
         low, high = x
         g = self.gate_conv(high)
@@ -158,7 +166,10 @@ class NeighborDecoupleAdapter(nn.Module):
         c_mid = max(c1 // reduction, 16)
         self.cv_red = Conv(c1, c_mid, k=1)
         self.cv_local = Conv(c_mid, c_mid, k=3)
-        self.cv_context = Conv(c_mid, c_mid, k=7)  # 扩大上下文感受野以增强密集车辆边界对比
+        self.cv_context = Conv(c_mid, c_mid, k=7)  # wider receptive field for dense vehicle boundary contrast
+        # Learnable contrast amplification factor (init=2.0)
+        # local-context difference is near-zero after BN; scaling amplifies the signal
+        self.contrast_scale = nn.Parameter(torch.tensor(2.0))
         self.contrast_gate = nn.Sequential(
             nn.Conv2d(c_mid, 1, kernel_size=1, bias=True),
             nn.Sigmoid(),
@@ -169,5 +180,5 @@ class NeighborDecoupleAdapter(nn.Module):
         f = self.cv_red(x)
         local = self.cv_local(f)
         context = self.cv_context(f)
-        gate = self.contrast_gate(local - context)
+        gate = self.contrast_gate(self.contrast_scale * (local - context))
         return self.cv_out(x * (1.0 + gate))

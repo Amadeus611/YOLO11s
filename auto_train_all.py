@@ -163,11 +163,10 @@ def main():
         # 实例化模型：加载 YAML 结构并级联 .load() 预训练权重
         model = YOLO(exp["yaml"]).load("yolo11s.pt")
 
-        # 组装训练参数（fixed + per-experiment overrides）
-        train_kwargs = dict(
+        # 组装公共训练参数（fixed + per-experiment overrides）
+        common_kwargs = dict(
             # --- 实验变量参数 ---
             data="UAVDT.yaml",
-            epochs=100,
             batch=exp["batch"],
             imgsz=960,             # 无人机微小目标必须使用高分辨率
             name=exp["name"],
@@ -180,11 +179,7 @@ def main():
             lrf=0.01,
             momentum=0.937,
             weight_decay=0.0005,   # ← 从 0.001 降至 0.0005，Mini 数据集不需要过强正则
-            patience=20,           # ← 从 0 改为 20，开启早停防止过拟合
             cos_lr=True,           # 余弦退火学习率
-
-            # --- Backbone 冻结（仅 PVRP 实验使用） ---
-            freeze=exp.get("freeze", None),
 
             # --- Warmup 预热 ---
             warmup_epochs=5.0,     # ← 从 3 增至 5，给新模块更充分的预热时间
@@ -230,10 +225,43 @@ def main():
         # 仅覆盖 SNAA 内部项（Table 5 或 Exp03 自定义参数）
         for k in ("snaa_kappa", "snaa_tau", "snaa_beta", "snaa_alpha_max"):
             if k in exp:
-                train_kwargs[k] = exp[k]
+                common_kwargs[k] = exp[k]
 
-        # 启动训练
-        model.train(**train_kwargs)
+        # =============================================================
+        # v3 改动：两阶段训练（仅对有 freeze 的 PVRP 实验生效）
+        # 旧策略：freeze=10 全程冻结 100 epoch → backbone 无法适配 UAVDT
+        # 新策略：Stage1 冻结 5ep 预热新模块 → Stage2 解冻全部继续训练
+        # =============================================================
+        if exp.get("freeze"):
+            # --- Stage 1：冻结 backbone 预热新模块（5 epoch） ---
+            print(f"  >>> Stage 1: 冻结 backbone 预热 (5 epochs) ...")
+            model.train(
+                **common_kwargs,
+                epochs=5,
+                patience=0,            # 预热阶段不早停
+                freeze=exp["freeze"],  # 冻结 backbone L0-L9
+            )
+
+            # --- Stage 2：解冻全部，继续训练（从 ep5 resume 到 100） ---
+            print(f"  >>> Stage 2: 解冻 backbone 全量训练 ...")
+            last_ckpt = f"/home/ssssss/1yolo/Ablation_Results/{exp['name']}/weights/last.pt"
+            model2 = YOLO(last_ckpt)
+            model2.train(
+                **common_kwargs,
+                epochs=100,            # 总 epoch（resume 会从 ep5 继续）
+                patience=20,           # 恢复早停
+                freeze=None,           # ← 解冻全部层
+                resume=True,
+                exist_ok=True,         # 写入同一目录
+            )
+        else:
+            # --- Baseline：单阶段正常训练 ---
+            model.train(
+                **common_kwargs,
+                epochs=100,
+                patience=20,
+                freeze=None,
+            )
 
         # 每一组实验结束后手动清空显存缓存
         torch.cuda.empty_cache()
