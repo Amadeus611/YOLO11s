@@ -183,6 +183,8 @@ CFG_FLOAT_KEYS = frozenset(
         "snaa_tau",
         "snaa_beta",
         "snaa_alpha_max",
+        "snaa_gamma",
+        "snaa_margin",
     }
 )
 CFG_FRACTION_KEYS = frozenset(

@@ -29,7 +29,7 @@ backbone:
 
 head:
   # --- (1) P2 proxy branch ---
-  - [2, 1, P2Proxy, [128, False, 0.5]]              # 11
+  - [2, 3, P2Proxy, [128, False, 0.5]]              # 11
   - [-1, 1, AntiAliasDown, [128]]                   # 12
 
   # --- FPN (P5 -> P3); naive 3-way concat at P3 ---

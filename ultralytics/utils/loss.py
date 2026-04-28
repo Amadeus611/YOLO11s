@@ -163,32 +163,39 @@ class BboxLoss(nn.Module):
 class SNAABboxLoss(BboxLoss):
     """Scale-Neighbor Aware Attraction (SNAA) Bounding-Box Loss.
 
-    Replaces only the IoU similarity term of ``BboxLoss`` with a weighted IoU
-    loss:
+    Full implementation of the SNAA formulation from the research design:
 
-        L_iou = sum_i [ cls_weight_i * alpha_i * rho_i * (1 - CIoU_i) ] / Z
+        s_i  = sqrt(w_i * h_i)
+        rho_i = exp(-||c_i - c_i^nn||^2 / (2 * kappa * s_i^2))
+        Delta_i = (||c_hat_i - c_i^nn|| - ||c_hat_i - c_i||) / (s_i + eps)
 
-    where
+        A_i = CIoU(b_hat_i, b_i)^gamma
+            * exp(-||c_hat_i - c_i||^2 / (2 * tau^2 * s_i^2))
+            * exp(-rho_i * max(0, margin - Delta_i) / margin)
 
-        alpha_i  = clamp(1 + kappa * log(s_ref / s_i), 1, alpha_max)
-        rho_i    = 1 + beta * exp(-tau * (d_i / s_i)^2)
+        alpha_i = clip((s_ref / (s_i + eps))^beta, 1, alpha_max)
 
-    ``s_i = sqrt(w_i * h_i)`` is the scale of the GT assigned to anchor i in
-    image pixels, ``s_ref`` is the mean scale over valid GTs in the batch, and
-    ``d_i`` is the center distance from that GT to its nearest *same-class*
-    neighbor GT in the same image (``inf`` if no eligible neighbor).
+        L_iou = sum_i [ cls_weight_i * alpha_i * (1 - A_i) ] / Z
 
-    The DFL term and the classification BCE term are unchanged -- only the IoU
-    weighting is modified. Setting ``kappa=0`` disables the scale term (alpha=1)
-    and ``beta=0`` disables the neighbor term (rho=1); setting both to 0 falls
-    back to the standard CIoU loss exactly.
+    Three coupled terms:
+    1. **IoU term**: standard CIoU raised to gamma (focuses on well-localized boxes)
+    2. **Center deviation**: scale-normalized Gaussian, tolerates larger absolute
+       error for larger objects; tau controls the tolerance band
+    3. **Repulsion**: when the predicted center drifts closer to a same-class
+       neighbor GT than to its own GT (Delta_i < margin), the attraction score
+       is penalised proportionally to the neighbour density rho_i
+
+    The DFL and BCE terms are unchanged. Setting beta=0 disables scale-weighting;
+    when no neighbour exists, rho_i=0 and repulsion=1 (no penalty).
 
     Args:
-        reg_max (int): DFL channels (identical to ``BboxLoss``).
-        kappa (float): Steepness of the small-object scale weighting.
-        tau (float): Temperature of the neighbor distance decay.
-        beta (float): Strength of the neighbor attraction term.
+        reg_max (int): DFL channels.
+        kappa (float): Neighbour-density decay in rho_i (larger = faster decay).
+        tau (float): Center-deviation temperature (larger = more tolerant).
+        beta (float): Scale-weight power; 0 disables scale weighting.
         alpha_max (float): Upper clip on the scale weight.
+        gamma (float): IoU power exponent.
+        margin (float): Repulsion margin in scale units; larger = stricter.
         eps (float): Numerical stability epsilon.
     """
 
@@ -198,7 +205,9 @@ class SNAABboxLoss(BboxLoss):
         kappa: float = 1.0,
         tau: float = 1.0,
         beta: float = 0.5,
-        alpha_max: float = 4.0,
+        alpha_max: float = 3.0,
+        gamma: float = 1.0,
+        margin: float = 1.0,
         eps: float = 1e-6,
     ) -> None:
         super().__init__(reg_max)
@@ -206,84 +215,155 @@ class SNAABboxLoss(BboxLoss):
         self.tau = float(tau)
         self.beta = float(beta)
         self.alpha_max = float(alpha_max)
+        self.gamma = float(gamma)
+        self.margin = float(margin)
         self.eps = float(eps)
 
+    # ------------------------------------------------------------------
+    #  Per-GT neighbour lookup
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _nearest_same_class_dist(
+    def _nearest_same_class_info(
         gt_bboxes: torch.Tensor,
         gt_labels: torch.Tensor,
         mask_gt: torch.Tensor,
-    ) -> torch.Tensor:
-        """Per-GT nearest same-class center distance, ``inf`` if none.
-
-        Args:
-            gt_bboxes (Tensor): ``(B, N, 4)`` xyxy GT boxes in image pixels.
-            gt_labels (Tensor): ``(B, N, 1)`` GT class ids.
-            mask_gt (Tensor): ``(B, N, 1)`` bool mask of valid (non-padded) GTs.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Per-GT nearest same-class neighbour index, distance and centre.
 
         Returns:
-            d_min (Tensor): ``(B, N)`` nearest same-class neighbor distance.
+            nn_idx   (B,N LongTensor):  index of nearest neighbour per GT
+            nn_dist  (B,N):            distance to that neighbour (inf if none)
+            nn_ctr   (B,N,2):          centre of that neighbour (0 if none)
         """
         B, N, _ = gt_bboxes.shape
-        if N == 0:
-            return gt_bboxes.new_zeros(B, 0)
-        centers = (gt_bboxes[..., :2] + gt_bboxes[..., 2:4]) * 0.5  # (B, N, 2)
-        dists = torch.cdist(centers, centers)  # (B, N, N)
-        labels = gt_labels.squeeze(-1)  # (B, N)
+        device = gt_bboxes.device
+        if N <= 1:
+            return (
+                torch.full((B, N), -1, dtype=torch.long, device=device),
+                torch.full((B, N), float("inf"), device=device),
+                torch.zeros(B, N, 2, device=device),
+            )
+
+        centres = (gt_bboxes[..., :2] + gt_bboxes[..., 2:4]) * 0.5  # (B, N, 2)
+        dists = torch.cdist(centres, centres)  # (B, N, N)
+
+        labels = gt_labels.squeeze(-1).long()  # (B, N)
         same_cls = labels.unsqueeze(1) == labels.unsqueeze(2)  # (B, N, N)
         valid = mask_gt.squeeze(-1).bool()  # (B, N)
-        valid_pair = valid.unsqueeze(1) & valid.unsqueeze(2)  # (B, N, N)
-        eye = torch.eye(N, dtype=torch.bool, device=gt_bboxes.device).unsqueeze(0)
+        valid_pair = valid.unsqueeze(1) & valid.unsqueeze(2)
+        eye = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)
         eligible = same_cls & valid_pair & ~eye
-        dists = dists.masked_fill(~eligible, float("inf"))
-        return dists.amin(dim=-1)  # (B, N)
 
-    def _compute_weights(
+        masked = dists.masked_fill(~eligible, float("inf"))
+        nn_dist, nn_idx = masked.min(dim=-1)  # (B, N)
+
+        has_nn = eligible.any(dim=-1)  # (B, N)
+        nn_dist = nn_dist.masked_fill(~has_nn, float("inf"))
+        # safe gather (indices for GTs without neighbours are unused downstream)
+        nn_idx_safe = nn_idx.masked_fill(~has_nn, 0)
+        nn_ctr = centres.gather(1, nn_idx_safe.unsqueeze(-1).expand(-1, -1, 2))
+
+        return nn_idx_safe, nn_dist, nn_ctr
+
+    # ------------------------------------------------------------------
+    #  Core SNAA computation
+    # ------------------------------------------------------------------
+
+    def _compute_snaa_attraction(
         self,
         fg_mask: torch.Tensor,
+        pred_bboxes: torch.Tensor,
+        target_bboxes: torch.Tensor,
         target_gt_idx: torch.Tensor,
         gt_labels: torch.Tensor,
         gt_bboxes: torch.Tensor,
         mask_gt: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute per-fg-anchor SNAA weights (alpha and rho).
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute per-fg-anchor (alpha, centre_dev, repulsion) tensors.
 
         Returns:
-            alpha (Tensor): ``(n_fg,)`` scale weight for each foreground anchor.
-            rho (Tensor): ``(n_fg,)`` neighbor weight for each foreground anchor.
+            alpha      (n_fg,):  scale weight
+            centre_dev (n_fg,):  Gaussian centre-deviation term
+            repulsion  (n_fg,):  neighbour-repulsion term (1.0 = no penalty)
         """
-        valid = mask_gt.squeeze(-1).bool()  # (B, N)
-        # Per-GT scale sqrt(w*h) in image pixels
-        wh = (gt_bboxes[..., 2:4] - gt_bboxes[..., 0:2]).clamp_min(0)  # (B, N, 2)
-        area = wh.prod(-1).clamp_min(self.eps)  # (B, N)
-        sigma_gt = area.sqrt()  # (B, N)
-        # Reference scale = mean sqrt(area) over valid GTs; fall back to 1 if none
-        if valid.any():
-            s_ref = sigma_gt[valid].mean().clamp_min(self.eps)
-        else:
-            s_ref = sigma_gt.new_tensor(1.0)
-        # Gather per-fg-anchor
-        sigma_per_anchor = sigma_gt.gather(dim=1, index=target_gt_idx)  # (B, N_a)
-        sigma_fg = sigma_per_anchor[fg_mask].clamp_min(self.eps)  # (n_fg,)
+        B, N_gt, _ = gt_bboxes.shape
+        valid = mask_gt.squeeze(-1).bool()  # (B, N_gt)
 
-        # Scale weight
-        if self.kappa > 0:
-            log_ratio = torch.log((s_ref + self.eps) / sigma_fg)
-            alpha = (1.0 + self.kappa * log_ratio).clamp(min=1.0, max=self.alpha_max)
+        # -- GT-level quantities ------------------------------------------------
+        wh_gt = (gt_bboxes[..., 2:4] - gt_bboxes[..., 0:2]).clamp_min(0)
+        area_gt = wh_gt.prod(-1).clamp_min(self.eps)
+        sigma_gt = area_gt.sqrt()  # s_i  per GT, (B, N_gt)
+        s_ref = sigma_gt[valid].mean().clamp_min(self.eps)
+
+        _, nn_dist, nn_ctr = self._nearest_same_class_info(
+            gt_bboxes, gt_labels, mask_gt,
+        )
+        has_nn = nn_dist < float("inf")  # (B, N_gt)
+
+        # Neighbour density rho_i (per GT)
+        rho_gt = torch.zeros(B, N_gt, device=gt_bboxes.device)
+        if has_nn.any():
+            ratio_sq = (
+                nn_dist[has_nn] / sigma_gt[has_nn].clamp_min(self.eps)
+            ).clamp_max(1e6).pow(2)
+            rho_gt[has_nn] = torch.exp(-ratio_sq / (2.0 * self.kappa))
+
+        GT_ctr = (gt_bboxes[..., :2] + gt_bboxes[..., 2:4]) * 0.5  # (B, N_gt, 2)
+
+        # -- Per-foreground-anchor quantities ------------------------------------
+        sigma_fg = sigma_gt.gather(1, target_gt_idx)[fg_mask].clamp_min(self.eps)
+        rho_fg = rho_gt.gather(1, target_gt_idx)[fg_mask]  # (n_fg,)
+        has_nn_fg = has_nn.gather(1, target_gt_idx)[fg_mask]  # (n_fg,)
+
+        # Scale weight  alpha_i = clip((s_ref / s_i)^beta, 1, alpha_max)
+        if self.beta > 0:
+            ratio = (s_ref / sigma_fg).clamp_max(1e6)
+            alpha = (ratio ** self.beta).clamp(1.0, self.alpha_max)
         else:
             alpha = torch.ones_like(sigma_fg)
 
-        # Neighbor weight
-        if self.beta > 0:
-            d_gt = self._nearest_same_class_dist(gt_bboxes, gt_labels, mask_gt)  # (B, N)
-            d_per_anchor = d_gt.gather(dim=1, index=target_gt_idx)  # (B, N_a)
-            d_fg = d_per_anchor[fg_mask]  # (n_fg,)
-            ratio_sq = (d_fg / sigma_fg).clamp_max(1e6).pow(2)
-            rho = 1.0 + self.beta * torch.exp(-self.tau * ratio_sq)
-        else:
-            rho = torch.ones_like(sigma_fg)
+        # Predicted and GT centres
+        pred_ctr = (pred_bboxes[fg_mask][..., :2]
+                    + pred_bboxes[fg_mask][..., 2:4]) * 0.5
+        gt_ctr_fg = GT_ctr.gather(1, target_gt_idx.unsqueeze(-1).expand(-1, -1, 2))[fg_mask]
 
-        return alpha, rho
+        # Nearest-neighbour centre per fg anchor
+        nn_ctr_fg = nn_ctr.gather(
+            1, target_gt_idx.unsqueeze(-1).expand(-1, -1, 2),
+        )[fg_mask]  # (n_fg, 2)
+
+        # -- Term 2: centre deviation -------------------------------------------
+        dist_own = (pred_ctr - gt_ctr_fg).pow(2).sum(-1).sqrt()  # ||c_hat - c||
+        if self.tau > 0:
+            centre_dev = torch.exp(
+                -dist_own.pow(2)
+                / (2.0 * self.tau ** 2 * sigma_fg.pow(2) + self.eps),
+            )
+        else:
+            centre_dev = torch.ones_like(dist_own)
+
+        # -- Term 3: repulsion ---------------------------------------------------
+        repulsion = torch.ones_like(dist_own)
+        if has_nn_fg.any():
+            dist_nn = (pred_ctr - nn_ctr_fg).pow(2).sum(-1).sqrt()  # ||c_hat - c^nn||
+            # Delta_i = (dist_to_neighbour - dist_to_own) / s_i
+            #   > 0  →  prediction is closer to own GT (safe)
+            #   < 0  →  prediction drifts toward neighbour
+            delta = (dist_nn - dist_own) / (sigma_fg + self.eps)
+
+            idx = has_nn_fg
+            rho_val = rho_fg[idx].clamp_max(10.0)
+            delta_val = delta[idx]
+            # Penalise when delta < margin (prediction not safely closer to own GT)
+            violation = (self.margin - delta_val).clamp_min(0)
+            repulsion[idx] = torch.exp(-rho_val * violation / self.margin)
+
+        return alpha, centre_dev, repulsion
+
+    # ------------------------------------------------------------------
+    #  Forward
+    # ------------------------------------------------------------------
 
     def forward(
         self,
@@ -302,9 +382,10 @@ class SNAABboxLoss(BboxLoss):
         mask_gt: torch.Tensor = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute SNAA-weighted IoU loss and standard DFL loss."""
+        """Compute SNAA attraction-based IoU loss and standard DFL loss."""
         cls_weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask],
+                       xywh=False, CIoU=True)
 
         if (
             gt_labels is not None
@@ -313,17 +394,33 @@ class SNAABboxLoss(BboxLoss):
             and mask_gt is not None
             and fg_mask.any()
         ):
-            alpha, rho = self._compute_weights(fg_mask, target_gt_idx, gt_labels, gt_bboxes, mask_gt)
-            effective = cls_weight * (alpha * rho).unsqueeze(-1)
+            alpha, centre_dev, repulsion = self._compute_snaa_attraction(
+                fg_mask, pred_bboxes, target_bboxes,
+                target_gt_idx, gt_labels, gt_bboxes, mask_gt,
+            )
+            # A_i = CIoU^gamma * centre_dev * repulsion
+            attraction = (
+                iou.clamp_min(self.eps).pow(self.gamma)
+                * centre_dev
+                * repulsion
+            )
+            effective = cls_weight * alpha.unsqueeze(-1)
         else:
+            attraction = iou
             effective = cls_weight
-        loss_iou = ((1.0 - iou) * effective).sum() / target_scores_sum
+
+        loss_iou = ((1.0 - attraction) * effective).sum() / target_scores_sum
 
         # DFL loss -- identical to BboxLoss
         if self.dfl_loss:
-            target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
+            target_ltrb = bbox2dist(anchor_points, target_bboxes,
+                                    self.dfl_loss.reg_max - 1)
             loss_dfl = (
-                self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * cls_weight
+                self.dfl_loss(
+                    pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max),
+                    target_ltrb[fg_mask],
+                )
+                * cls_weight
             )
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
@@ -335,7 +432,8 @@ class SNAABboxLoss(BboxLoss):
             pred_dist[..., 0::2] /= imgsz[1]
             pred_dist[..., 1::2] /= imgsz[0]
             loss_dfl = (
-                F.l1_loss(pred_dist[fg_mask], target_ltrb[fg_mask], reduction="none").mean(-1, keepdim=True)
+                F.l1_loss(pred_dist[fg_mask], target_ltrb[fg_mask],
+                          reduction="none").mean(-1, keepdim=True)
                 * cls_weight
             )
             loss_dfl = loss_dfl.sum() / target_scores_sum
@@ -558,7 +656,9 @@ class v8DetectionLoss:
                 kappa=getattr(h, "snaa_kappa", 1.0),
                 tau=getattr(h, "snaa_tau", 1.0),
                 beta=getattr(h, "snaa_beta", 0.5),
-                alpha_max=getattr(h, "snaa_alpha_max", 4.0),
+                alpha_max=getattr(h, "snaa_alpha_max", 3.0),
+                gamma=getattr(h, "snaa_gamma", 1.0),
+                margin=getattr(h, "snaa_margin", 1.0),
             ).to(device)
         else:
             self.bbox_loss = BboxLoss(m.reg_max).to(device)

@@ -40,7 +40,7 @@ class P2Proxy(nn.Module):
         e (float): Hidden channel expansion ratio, typically <=0.5 for Lite.
     """
 
-    def __init__(self, c1: int, c2: int, n: int = 1, shortcut: bool = False, e: float = 0.5) -> None:
+    def __init__(self, c1: int, c2: int, n: int = 2, shortcut: bool = False, e: float = 0.5) -> None:
         super().__init__()
         self.c = max(int(c2 * e), 8)
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
@@ -166,7 +166,7 @@ class NeighborDecoupleAdapter(nn.Module):
         c_mid = max(c1 // reduction, 16)
         self.cv_red = Conv(c1, c_mid, k=1)
         self.cv_local = Conv(c_mid, c_mid, k=3)
-        self.cv_context = Conv(c_mid, c_mid, k=7)  # wider receptive field for dense vehicle boundary contrast
+        self.cv_context = Conv(c_mid, c_mid, k=5)  # moderate receptive field for small vehicle boundaries
         # Learnable contrast amplification factor (init=2.0)
         # local-context difference is near-zero after BN; scaling amplifies the signal
         self.contrast_scale = nn.Parameter(torch.tensor(2.0))

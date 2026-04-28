@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/ssssss/1yolo/Dataset/**)",
+      "Read(//home/ssssss/1yolo/**)"
+    ]
+  }
+}

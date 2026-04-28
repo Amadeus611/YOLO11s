@@ -29,7 +29,7 @@ backbone:
 
 head:
   # --- (1) P2 proxy branch ---
-  - [2, 1, P2Proxy, [128, False, 0.5]]              # 11  proxy @ P2/4
+  - [2, 3, P2Proxy, [128, False, 0.5]]              # 11  proxy @ P2/4
   - [-1, 1, AntiAliasDown, [128]]                   # 12  proxy @ P3/8
 
   # --- Standard FPN (P5 -> P3) ---

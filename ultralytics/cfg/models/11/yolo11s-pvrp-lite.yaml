@@ -33,7 +33,7 @@ backbone:
 
 head:
   # --- PVRP (1) P2 proxy ---
-  - [2, 1, P2Proxy, [128, False, 0.5]]              # 11
+  - [2, 3, P2Proxy, [128, False, 0.5]]              # 11
   - [-1, 1, AntiAliasDown, [128]]                   # 12
 
   # --- FPN (P5 -> P3); P4 FPN is SLIMMED (e=0.25) ---

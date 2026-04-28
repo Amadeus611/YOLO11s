@@ -1,5 +1,6 @@
-# UAVDT -> YOLO
-path: /home/ssssss/1yolo/Dataset/UAVDT_Mini
+# UAVDT -> YOLO (full dataset)
+# Update the path below to your actual full UAVDT dataset location
+path: /home/ssssss/1yolo/Dataset/UAVDT
 train: images/train
 val: images/val
 
