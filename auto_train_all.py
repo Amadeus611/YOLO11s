@@ -33,32 +33,32 @@ def main():
             "yaml": "ultralytics/cfg/models/11/yolo11s.yaml",
             "name": "Exp01_Baseline",
             "snaa": False,
-            "batch": 16,
+            "batch": 48,
         },
         {
             "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp.yaml",
             "name": "Exp02_PVRP_Main",
             "snaa": False,
-            "batch": 16,
+            "batch": 48,
         },
-        # {
-        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp.yaml",
-        #     "name": "Exp03_PVRP_SNAA",
-        #     "snaa": True,
-        #     "batch": 16,
-        # },
+        {
+            "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp.yaml",
+            "name": "Exp03_PVRP_SNAA",
+            "snaa": True,
+            "batch": 48,
+        },
         # {
         #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-lite.yaml",
         #     "name": "Exp04_PVRP_Lite",
         #     "snaa": False,
         #     "batch": 16,
         # },
-        {
-            "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-lite.yaml",
-            "name": "Exp05_PVRP_Lite_SNAA_Full",
-            "snaa": True,
-            "batch": 16,
-        },
+        # {
+        #     "yaml": "ultralytics/cfg/models/11/yolo11s-pvrp-lite.yaml",
+        #     "name": "Exp05_PVRP_Lite_SNAA_Full",
+        #     "snaa": True,
+        #     "batch": 48,
+        # },
 
         # =====================================================
         # Table 2: PVRP 主创新子模块消融
@@ -154,7 +154,7 @@ def main():
         common_kwargs = dict(
             # --- 数据集 ---
             data="UAVDT.yaml",
-            imgsz=960,
+            imgsz=640,
             batch=exp["batch"],
             name=exp["name"],
             project="/home/ssssss/1yolo/Ablation_Results",
@@ -163,7 +163,7 @@ def main():
             val=True,
             plots=True,
             save=True,
-            amp=False,
+            amp=True,
             cache=False,
 
             # --- 优化器 (标准 AdamW) ---
